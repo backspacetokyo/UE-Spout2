@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0",
+	"VersionName": "1.1",
 	"FriendlyName": "Spout2",
 	"Description": "",
 	"Category": "Other",
@@ -13,6 +13,9 @@
 	"EngineVersion": "4.25.0",
 	"CanContainContent": true,
 	"Installed": true,
+	"SupportedTargetPlatforms": [
+		"Win64"
+	],
 	"Modules": [
 		{
 			"Name": "Spout2",
