@@ -13,13 +13,11 @@ class SPOUT2_API USpoutRecieverActorComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
+	struct SpoutRecieverContext;
+	TSharedPtr<SpoutRecieverContext> context;
+
 	UPROPERTY()
 	UTexture2D* IntermediateTexture2D = nullptr;
-
-	FCriticalSection Mutex;
-
-	void InitResource(int width, int height, UTextureRenderTarget2D* DestTextureRenderTarget2D);
-	void DisposeResource();
 
 	void Tick_RenderThread(FRHICommandListImmediate& RHICmdList, void* hSharehandle, FTextureRenderTargetResource* RenderTargetResource);
 

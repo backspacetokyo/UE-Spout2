@@ -13,10 +13,11 @@
 
 static std::map<std::string, int> sender_name_reference_countor;
 
-class USpoutSenderActorComponent::SpoutSenderContext
+struct USpoutSenderActorComponent::SpoutSenderContext
 {
 	ID3D11Device* D3D11Device = nullptr;
 	ID3D11On12Device* D3D11on12Device = nullptr;
+	ID3D11Resource* WrappedDX11Resource = nullptr;
 
 	spoutSenderNames senders;
 	spoutDirectX sdx;
@@ -27,12 +28,9 @@ class USpoutSenderActorComponent::SpoutSenderContext
 
 	HANDLE sharedSendingHandle = nullptr;
 	ID3D11Texture2D* sendingTexture = nullptr;
-// 	ID3D11Texture2D* sourceTexture = nullptr;
 	ID3D11DeviceContext* deviceContext = nullptr;
 
 	FRHITexture2D* Texture2D = nullptr;
-
-public:
 
 	SpoutSenderContext(const FName& Name,
 		FRHITexture2D* Texture2D)
@@ -61,9 +59,8 @@ public:
 		{
 			ID3D12Device* Device12 = static_cast<ID3D12Device*>(GDynamicRHI->RHIGetNativeDevice());
 			UINT DeviceFlags11 = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-			HRESULT res = S_OK;
 
-			res = D3D11On12CreateDevice(
+			verify(D3D11On12CreateDevice(
 				Device12,
 				DeviceFlags11,
 				nullptr,
@@ -74,15 +71,9 @@ public:
 				&D3D11Device,
 				&deviceContext,
 				nullptr
-			);
+			) == S_OK);
 
-			if (res != S_OK)
-				throw;
-
-			res = D3D11Device->QueryInterface(__uuidof(ID3D11On12Device), (void**)&D3D11on12Device);
-
-			if (res != S_OK)
-				throw;
+			verify(D3D11Device->QueryInterface(__uuidof(ID3D11On12Device), (void**)&D3D11on12Device) == S_OK);
 
 			D3D12_RESOURCE_DESC desc;
 			ID3D12Resource* NativeTex = (ID3D12Resource*)Texture2D->GetNativeResource();
@@ -92,6 +83,15 @@ public:
 			height = desc.Height;
 
 			texFormat = desc.Format;
+
+			D3D11_RESOURCE_FLAGS rf11 = {};
+
+			verify(D3D11on12Device->CreateWrappedResource(
+				NativeTex, &rf11,
+				D3D12_RESOURCE_STATE_COPY_SOURCE,
+				D3D12_RESOURCE_STATE_PRESENT, __uuidof(ID3D11Resource),
+				(void**)&WrappedDX11Resource) == S_OK);
+
 		}
 		else
 		{
@@ -102,9 +102,7 @@ public:
 			texFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
 		}
 
-		ANSICHAR AnsiName[NAME_SIZE];
-		Name.GetPlainANSIString(AnsiName);
-		Name_str = AnsiName;
+		Name_str = TCHAR_TO_ANSI(*Name.ToString());;
 
 		verify(sdx.CreateSharedDX11Texture(D3D11Device, width, height, texFormat, &sendingTexture, sharedSendingHandle));
 
@@ -113,7 +111,7 @@ public:
 
 		sender_name_reference_countor[Name_str] += 1;
 
-		verify(senders.CreateSender(AnsiName, width, height, sharedSendingHandle, texFormat));
+		verify(senders.CreateSender(Name_str.c_str(), width, height, sharedSendingHandle, texFormat));
 	}
 
 	~SpoutSenderContext()
@@ -135,6 +133,12 @@ public:
 			deviceContext = nullptr;
 		}
 
+		if (WrappedDX11Resource)
+		{
+			D3D11on12Device->ReleaseWrappedResources(&WrappedDX11Resource, 1);
+			WrappedDX11Resource = nullptr;
+		}
+
 		if (D3D11on12Device)
 		{
 			D3D11on12Device->Release();
@@ -154,9 +158,9 @@ public:
 			return;
 
 		FString RHIName = GDynamicRHI->GetName();
+
 		if (RHIName == TEXT("D3D11"))
 		{
-			Texture2D;
 			ENQUEUE_RENDER_COMMAND(SpoutSenderRenderThreadOp)([this](FRHICommandListImmediate& RHICmdList) {
 				ID3D11Texture2D* NativeTex = (ID3D11Texture2D*)Texture2D->GetNativeResource();
 
@@ -171,25 +175,11 @@ public:
 		else if (RHIName == TEXT("D3D12"))
 		{
 			ENQUEUE_RENDER_COMMAND(SpoutSenderRenderThreadOp)([this](FRHICommandListImmediate& RHICmdList) {
-
-				ID3D11Resource* WrappedDX11SrcResource = nullptr;
-				ID3D12Resource* SrcDX12Resource = (ID3D12Resource*)this->Texture2D->GetNativeResource();
-				D3D11_RESOURCE_FLAGS rf11 = {};
-
-				HRESULT res = this->D3D11on12Device->CreateWrappedResource(
-					SrcDX12Resource, &rf11,
-					D3D12_RESOURCE_STATE_RENDER_TARGET,
-					D3D12_RESOURCE_STATE_PRESENT, __uuidof(ID3D11Resource),
-					(void**)&WrappedDX11SrcResource);
-
-				if (res != S_OK)
-					throw;
-
-				this->deviceContext->CopyResource(sendingTexture, WrappedDX11SrcResource);
+				this->D3D11on12Device->AcquireWrappedResources(&WrappedDX11Resource, 1);
+				this->deviceContext->CopyResource(sendingTexture, WrappedDX11Resource);
+				this->D3D11on12Device->ReleaseWrappedResources(&WrappedDX11Resource, 1);
 				this->deviceContext->Flush();
 
-				this->D3D11on12Device->ReleaseWrappedResources(&WrappedDX11SrcResource, 1);
- 
 				verify(this->senders.UpdateSender(TCHAR_TO_ANSI(*this->Name.ToString()),
 					this->width, this->height,
 					this->sharedSendingHandle));

@@ -12,7 +12,7 @@ class SPOUT2_API USpoutSenderActorComponent : public UActorComponent
 {
 	GENERATED_BODY()
 
-	class SpoutSenderContext;
+	struct SpoutSenderContext;
 	TSharedPtr<SpoutSenderContext> context;
 
 public:	

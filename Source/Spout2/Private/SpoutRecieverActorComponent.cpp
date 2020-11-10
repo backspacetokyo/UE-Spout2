@@ -5,7 +5,7 @@
 #include <string>
 
 #include "Windows/AllowWindowsPlatformTypes.h" 
-#include <d3d11.h>
+#include <d3d11on12.h>
 #include "Spout.h"
 #include "Windows/HideWindowsPlatformTypes.h"
 
@@ -143,6 +143,132 @@ IMPLEMENT_SHADER_TYPE(, FTextureCopyVertexShader, TEXT("/Plugin/Spout2/SpoutRece
 
 //////////////////////////////////////////////////////////////////////////
 
+struct USpoutRecieverActorComponent::SpoutRecieverContext
+{
+	unsigned int width = 0, height = 0;
+	DXGI_FORMAT dwFormat = DXGI_FORMAT_UNKNOWN;
+	EPixelFormat format = PF_Unknown;
+	FRHITexture2D* Texture2D;
+
+	ID3D11Device* D3D11Device = nullptr;
+	ID3D11DeviceContext* Context = nullptr;
+
+	ID3D12Device* D3D12Device = nullptr;
+	ID3D11On12Device* D3D11on12Device = nullptr;
+	ID3D11Resource* WrappedDX11Resource = nullptr;
+
+	SpoutRecieverContext(unsigned int width, unsigned int height, DXGI_FORMAT dwFormat, FRHITexture2D* Texture2D)
+		: width(width)
+		, height(height)
+		, dwFormat(dwFormat)
+		, Texture2D(Texture2D)
+	{
+		if (dwFormat == DXGI_FORMAT_B8G8R8A8_UNORM)
+			format = PF_B8G8R8A8;
+		else if (dwFormat == DXGI_FORMAT_R16G16B16A16_FLOAT)
+			format = PF_FloatRGBA;
+		else if (dwFormat == DXGI_FORMAT_R32G32B32A32_FLOAT)
+			format = PF_A32B32G32R32F;
+
+		FString RHIName = GDynamicRHI->GetName();
+
+		if (RHIName == TEXT("D3D11"))
+		{
+			D3D11Device = (ID3D11Device*)GDynamicRHI->RHIGetNativeDevice();
+			D3D11Device->GetImmediateContext(&Context);
+		}
+		else if (RHIName == TEXT("D3D12"))
+		{
+			D3D12Device = static_cast<ID3D12Device*>(GDynamicRHI->RHIGetNativeDevice());
+			UINT DeviceFlags11 = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+
+			verify(D3D11On12CreateDevice(
+				D3D12Device,
+				DeviceFlags11,
+				nullptr,
+				0,
+				nullptr,
+				0,
+				0,
+				&D3D11Device,
+				&Context,
+				nullptr
+			) == S_OK);
+
+			verify(D3D11Device->QueryInterface(__uuidof(ID3D11On12Device), (void**)&D3D11on12Device) == S_OK);
+			
+			ID3D12Resource* NativeTex = (ID3D12Resource*)Texture2D->GetNativeResource();
+
+			D3D11_RESOURCE_FLAGS rf11 = {};
+
+			verify(D3D11on12Device->CreateWrappedResource(
+				NativeTex, &rf11,
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				D3D12_RESOURCE_STATE_PRESENT, __uuidof(ID3D11Resource),
+				(void**)&WrappedDX11Resource) == S_OK);
+		}
+		else throw;
+	}
+
+	~SpoutRecieverContext()
+	{
+		if (WrappedDX11Resource)
+		{
+			D3D11on12Device->ReleaseWrappedResources(&WrappedDX11Resource, 1);
+			WrappedDX11Resource = nullptr;
+		}
+
+		if (D3D11on12Device)
+		{
+			D3D11on12Device->Release();
+			D3D11on12Device = nullptr;
+		}
+
+		if (D3D11Device)
+		{
+			D3D11Device->Release();
+			D3D11Device = nullptr;
+		}
+
+		if (Context)
+		{
+			Context->Release();
+			Context = nullptr;
+		}
+
+		if (D3D12Device)
+		{
+			D3D12Device->Release();
+			D3D12Device = nullptr;
+		}
+	}
+
+	void Tick(ID3D11Resource* SrcTexture)
+	{
+		check(IsInRenderingThread());
+		if (!GWorld || !SrcTexture) return;
+
+		FString RHIName = GDynamicRHI->GetName();
+
+		if (RHIName == TEXT("D3D11"))
+		{
+			ID3D11Texture2D* NativeTex = (ID3D11Texture2D*)Texture2D->GetNativeResource();
+
+			Context->CopyResource(NativeTex, SrcTexture);
+			Context->Flush();
+		}
+		else if (RHIName == TEXT("D3D12"))
+		{
+			D3D11on12Device->AcquireWrappedResources(&WrappedDX11Resource, 1);
+			Context->CopyResource(WrappedDX11Resource, SrcTexture);
+			D3D11on12Device->ReleaseWrappedResources(&WrappedDX11Resource, 1);
+			Context->Flush();
+		}
+	}
+};
+
+//////////////////////////////////////////////////////////////////////////
+
 USpoutRecieverActorComponent::USpoutRecieverActorComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -168,28 +294,42 @@ void USpoutRecieverActorComponent::TickComponent(float DeltaTime, ELevelTick Tic
 	if (!InputTexture)
 		return;
 
-	static ANSICHAR AnsiName[NAME_SIZE];
-	SubscribeName.GetPlainANSIString(AnsiName);
-
 	unsigned int width = 0, height = 0;
 	HANDLE hSharehandle = nullptr;
 	DXGI_FORMAT dwFormat = DXGI_FORMAT_UNKNOWN;
 
-	bool find_sender = senders.FindSender((char*)AnsiName, width, height, hSharehandle, (DWORD&)dwFormat);
+	bool find_sender = senders.FindSender(TCHAR_TO_ANSI(*SubscribeName.ToString()), width, height, hSharehandle, (DWORD&)dwFormat);
+
+	EPixelFormat format = PF_Unknown;
+
+	if (dwFormat == DXGI_FORMAT_B8G8R8A8_UNORM)
+		format = PF_B8G8R8A8;
+	else if (dwFormat == DXGI_FORMAT_R16G16B16A16_FLOAT)
+		format = PF_FloatRGBA;
+	else if (dwFormat == DXGI_FORMAT_R32G32B32A32_FLOAT)
+		format = PF_A32B32G32R32F;
 
 	if (!find_sender
-		|| dwFormat == DXGI_FORMAT_UNKNOWN)
+		|| format == PF_Unknown)
 		return;
-
-	FScopeLock Lock(&Mutex);
-
-	InitResource(width, height, InputTexture);
 
 	{
 		FTextureRenderTargetResource* RenderTargetResource = InputTexture->GameThread_GetRenderTargetResource();
 
-		ENQUEUE_RENDER_COMMAND(SpoutRecieverRenderThreadOp)([this, hSharehandle, RenderTargetResource](FRHICommandListImmediate& RHICmdList) {
-			FScopeLock Lock(&Mutex);
+		ENQUEUE_RENDER_COMMAND(SpoutRecieverRenderThreadOp)([this, hSharehandle, RenderTargetResource, width, height, dwFormat, format](FRHICommandListImmediate& RHICmdList) {
+
+			if (!context
+				|| context->width != width
+				|| context->height != height
+				|| context->dwFormat != dwFormat)
+			{
+				IntermediateTexture2D = UTexture2D::CreateTransient(width, height, format);
+				IntermediateTexture2D->UpdateResource();
+
+				FRHITexture2D* Texture2D = IntermediateTexture2D->Resource->TextureRHI->GetTexture2D();
+				context = TSharedPtr<SpoutRecieverContext>(new SpoutRecieverContext(width, height, dwFormat, Texture2D));
+			}
+
 			this->Tick_RenderThread(RHICmdList, hSharehandle, RenderTargetResource);
 		});
 	}
@@ -203,61 +343,24 @@ void USpoutRecieverActorComponent::Tick_RenderThread(
 {
 	check(IsInRenderingThread());
 
-	if (!GWorld
-		|| !IntermediateTexture2D) return;
+	if (!GWorld || !context) return;
 
-	ID3D11Device* D3D11Device = (ID3D11Device*)GDynamicRHI->RHIGetNativeDevice();
+	ID3D11Resource* SrcTexture = nullptr;
+	verify(context->D3D11Device->OpenSharedResource(hSharehandle, __uuidof(ID3D11Resource), (void**)(&SrcTexture)) == S_OK);
+
+	context->Tick(SrcTexture);
+
 	FShaderResourceViewRHIRef IntermediateTextureParameterSRV;
 	ERHIFeatureLevel::Type FeatureLevel = GWorld->Scene->GetFeatureLevel();
 
-	//////////////////////////////////////////////////////////////////////////
-	// Copy Spout shared texture to UTexture2D
+	{
+		auto Resource = IntermediateTexture2D->Resource;
+		auto ParamRef = (Resource->TextureRHI.GetReference());
+		IntermediateTextureParameterSRV = RHICreateShaderResourceView(ParamRef, 0);
+		verify(IntermediateTextureParameterSRV.IsValid());
+	}
 
 	{
-		ID3D11Resource* resource = nullptr;
-
-		if (D3D11Device->OpenSharedResource(hSharehandle, __uuidof(ID3D11Resource), (void**)(&resource)) == S_OK)
-		{
-			check(resource);
-
-			ID3D11Texture2D* SrcTexture = (ID3D11Texture2D*)resource;
-
-			FTextureReferenceRHIRef TRefRHI = IntermediateTexture2D->TextureReference.TextureReferenceRHI;
-
-			if (!TRefRHI)
-				return;
-
-			FRHITexture* RHITex = TRefRHI->GetReferencedTexture();
-			check(RHITex);
-
-			ID3D11Texture2D* DstTexture = (ID3D11Texture2D*)RHITex->GetNativeResource();
-			check(DstTexture);
-
-			ID3D11DeviceContext* Context;
-			D3D11Device->GetImmediateContext(&Context);
-
-			Context->CopyResource(DstTexture, SrcTexture);
-			Context->Flush();
-
-			resource->Release();
-		}
-		else
-		{
-			return;
-		}
-
-		//////////////////////////////////////////////////////////////////////////
-
-		if (!IntermediateTextureParameterSRV.IsValid())
-		{
-			auto Resource = IntermediateTexture2D->Resource;
-			auto ParamRef = (Resource->TextureRHI.GetReference());
-			IntermediateTextureParameterSRV = RHICreateShaderResourceView(ParamRef, 0);
-			check(IntermediateTextureParameterSRV.IsValid());
-		}
-
-		//////////////////////////////////////////////////////////////////////////
-
 		FRHIRenderPassInfo RPInfo(RenderTargetResource->GetRenderTargetTexture(), ERenderTargetActions::DontLoad_Store, RenderTargetResource->TextureRHI);
 
 		RHICmdList.BeginRenderPass(RPInfo, TEXT("CopySpoutImage"));
@@ -308,25 +411,4 @@ void USpoutRecieverActorComponent::Tick_RenderThread(
 		}
 		RHICmdList.EndRenderPass();
 	}
-}
-
-void USpoutRecieverActorComponent::InitResource(int width, int height, UTextureRenderTarget2D* DestTextureRenderTarget2D)
-{
-	auto fmt = DestTextureRenderTarget2D->GetFormat();
-
-	if (IntermediateTexture2D == nullptr
-		|| IntermediateTexture2D->IsValidLowLevel() == false
-		|| IntermediateTexture2D->Resource == false
-		|| IntermediateTexture2D->GetSurfaceWidth() != width
-		|| IntermediateTexture2D->GetSurfaceHeight() != height)
-	{
-		IntermediateTexture2D = UTexture2D::CreateTransient(width, height,
-			DestTextureRenderTarget2D->GetFormat());
-		IntermediateTexture2D->UpdateResource();
-	}
-}
-
-void USpoutRecieverActorComponent::DisposeResource()
-{
-	IntermediateTexture2D = nullptr;
 }
