@@ -15,14 +15,14 @@ public class Spout2 : ModuleRules
 		get { return Path.GetFullPath(Path.Combine(ModulePath, "../../ThirdParty/")); }
 	}
 
-	public string GetUProjectPath()
+	public string GetPluginPath()
 	{
-		return Path.Combine(ModuleDirectory, "../../../..");
+		return Path.Combine(ModuleDirectory, "../../");
 	}
 
 	private string CopyToProjectBinaries(string Filepath, ReadOnlyTargetRules Target)
 	{
-		string BinariesDir = Path.Combine(GetUProjectPath(), "Binaries", Target.Platform.ToString());
+		string BinariesDir = Path.Combine(GetPluginPath(), "Binaries", Target.Platform.ToString());
 		string Filename = Path.GetFileName(Filepath);
 
 		//convert relative path 

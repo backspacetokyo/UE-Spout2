@@ -350,6 +350,8 @@ void USpoutRecieverActorComponent::Tick_RenderThread(
 
 	context->Tick(SrcTexture);
 
+	SrcTexture->Release();
+
 	FShaderResourceViewRHIRef IntermediateTextureParameterSRV;
 	ERHIFeatureLevel::Type FeatureLevel = GWorld->Scene->GetFeatureLevel();
 
