@@ -230,17 +230,18 @@ struct USpoutRecieverActorComponent::SpoutRecieverContext
 			D3D11Device = nullptr;
 		}
 
+		if (D3D12Device)
+		{
+			D3D12Device->Release();
+			D3D12Device = nullptr;
+		}
+
 		if (Context)
 		{
 			Context->Release();
 			Context = nullptr;
 		}
 
-		if (D3D12Device)
-		{
-			D3D12Device->Release();
-			D3D12Device = nullptr;
-		}
 	}
 
 	void Tick(ID3D11Resource* SrcTexture)
@@ -343,7 +344,7 @@ void USpoutRecieverActorComponent::Tick_RenderThread(
 {
 	check(IsInRenderingThread());
 
-	if (!GWorld || !context) return;
+	if (!GWorld || !GWorld->Scene || !context) return;
 
 	ID3D11Resource* SrcTexture = nullptr;
 	verify(context->D3D11Device->OpenSharedResource(hSharehandle, __uuidof(ID3D11Resource), (void**)(&SrcTexture)) == S_OK);
