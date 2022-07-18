@@ -218,9 +218,9 @@ void USpoutSenderActorComponent::TickComponent(float DeltaTime, ELevelTick TickT
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	if (!OutputTexture
-		|| !OutputTexture->Resource->TextureRHI) return;
+		|| !OutputTexture->GetResource()->TextureRHI) return;
 
-	auto Texture2D = OutputTexture->Resource->TextureRHI->GetTexture2D();
+	auto Texture2D = OutputTexture->GetResource()->TextureRHI->GetTexture2D();
 	if (!Texture2D)
 	{
 		context.Reset();

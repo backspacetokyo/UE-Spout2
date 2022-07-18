@@ -13,6 +13,7 @@
 #include "UniformBuffer.h"
 #include "RHICommandList.h"
 #include "RHIUtilities.h"
+#include "MediaShaders.h"
 
 static spoutSenderNames senders;
 
@@ -39,7 +40,7 @@ class FTextureCopyPixelShader : public FGlobalShader
 	DECLARE_SHADER_TYPE(FTextureCopyPixelShader, Global);
 public:
 
-#if ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION >= 25
+#if (ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION >= 25) || (ENGINE_MAJOR_VERSION == 5)
 	LAYOUT_FIELD(FShaderResourceParameter, SrcTexture);
 #else ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION <= 24
 	FShaderResourceParameter SrcTexture;
@@ -73,73 +74,7 @@ struct FTextureVertex
 	FVector2D UV;
 };
 
-class FSimpleVertexBuffer : public FVertexBuffer
-{
-public:
-	void InitRHI() override
-	{
-		TResourceArray<FTextureVertex, VERTEXBUFFER_ALIGNMENT> Vertices;
-		Vertices.SetNumUninitialized(4);
-
-		Vertices[0].Position = FVector4(-1.0f, 1.0f, 0, 1.0f);
-		Vertices[1].Position = FVector4(1.0f, 1.0f, 0, 1.0f);
-		Vertices[2].Position = FVector4(-1.0f, -1.0f, 0, 1.0f);
-		Vertices[3].Position = FVector4(1.0f, -1.0f, 0, 1.0f);
-		Vertices[0].UV = FVector2D(0, 0);
-		Vertices[1].UV = FVector2D(1, 0);
-		Vertices[2].UV = FVector2D(0, 1);
-		Vertices[3].UV = FVector2D(1, 1);
-
-		FRHIResourceCreateInfo CreateInfo(&Vertices);
-		VertexBufferRHI = RHICreateVertexBuffer(Vertices.GetResourceDataSize(), BUF_Static, CreateInfo);
-	}
-};
-
-TGlobalResource<FSimpleVertexBuffer> GSimpleVertexBuffer;
-
-class FTextureVertexDeclaration : public FRenderResource
-{
-public:
-	FVertexDeclarationRHIRef VertexDeclarationRHI;
-
-	virtual void InitRHI() override
-	{
-		FVertexDeclarationElementList Elements;
-		uint32 Stride = sizeof(FTextureVertex);
-		Elements.Add(FVertexElement(0, STRUCT_OFFSET(FTextureVertex, Position), VET_Float4, 0, Stride));
-		Elements.Add(FVertexElement(0, STRUCT_OFFSET(FTextureVertex, UV), VET_Float2, 1, Stride));
-		VertexDeclarationRHI = RHICreateVertexDeclaration(Elements);
-	}
-
-	virtual void ReleaseRHI() override
-	{
-		VertexDeclarationRHI.SafeRelease();
-	}
-};
-
-TGlobalResource<FTextureVertexDeclaration> GSimpleVertexDeclaration;
-
-class FSimpleIndexBuffer : public FIndexBuffer
-{
-public:
-	void InitRHI() override
-	{
-		const uint16 Indices[] = { 0, 1, 2, 3 };
-
-		TResourceArray<uint16, INDEXBUFFER_ALIGNMENT> IndexBuffer;
-		uint32 NumIndices = UE_ARRAY_COUNT(Indices);
-		IndexBuffer.AddUninitialized(NumIndices);
-		FMemory::Memcpy(IndexBuffer.GetData(), Indices, NumIndices * sizeof(uint16));
-
-		FRHIResourceCreateInfo CreateInfo(&IndexBuffer);
-		IndexBufferRHI = RHICreateIndexBuffer(sizeof(uint16), IndexBuffer.GetResourceDataSize(), BUF_Static, CreateInfo);
-	}
-};
-
-TGlobalResource<FSimpleIndexBuffer> GSimpleIndexBuffer;
-
 IMPLEMENT_SHADER_TYPE(, FTextureCopyPixelShader, TEXT("/Plugin/Spout2/SpoutReceiverCopyShader.usf"), TEXT("MainPixelShader"), SF_Pixel)
-IMPLEMENT_SHADER_TYPE(, FTextureCopyVertexShader, TEXT("/Plugin/Spout2/SpoutReceiverCopyShader.usf"), TEXT("MainVertexShader"), SF_Vertex)
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -244,7 +179,7 @@ struct USpoutRecieverActorComponent::SpoutRecieverContext
 
 	}
 
-	void Tick(ID3D11Resource* SrcTexture)
+	void CopyResource(ID3D11Resource* SrcTexture)
 	{
 		check(IsInRenderingThread());
 		if (!GWorld || !SrcTexture) return;
@@ -290,9 +225,11 @@ void USpoutRecieverActorComponent::EndPlay(const EEndPlayReason::Type EndPlayRea
 // Called every frame
 void USpoutRecieverActorComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	check(IsInGameThread());
+	
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
-	if (!InputTexture)
+	if (!OutputRenderTarget)
 		return;
 
 	unsigned int width = 0, height = 0;
@@ -315,23 +252,38 @@ void USpoutRecieverActorComponent::TickComponent(float DeltaTime, ELevelTick Tic
 		return;
 
 	{
-		FTextureRenderTargetResource* RenderTargetResource = InputTexture->GameThread_GetRenderTargetResource();
+		if (!IntermediateTexture2D
+			|| IntermediateTexture2D->GetSizeX() != width
+			|| IntermediateTexture2D->GetSizeY() != height
+			|| IntermediateTexture2D->GetPixelFormat() != format)
+		{
+			IntermediateTexture2D = UTexture2D::CreateTransient(width, height, format, FName("SpoutIntermediate"));
+			IntermediateTexture2D->UpdateResource();
 
-		ENQUEUE_RENDER_COMMAND(SpoutRecieverRenderThreadOp)([this, hSharehandle, RenderTargetResource, width, height, dwFormat, format](FRHICommandListImmediate& RHICmdList) {
+			context = nullptr;
+		}
 
-			if (!context
-				|| context->width != width
-				|| context->height != height
-				|| context->dwFormat != dwFormat)
+		ENQUEUE_RENDER_COMMAND(SpoutRecieverRenderThreadOp)([this, hSharehandle, width, height, dwFormat, format](FRHICommandListImmediate& RHICmdList) {
+			check(IsInRenderingThread());
+
+			if (!OutputRenderTarget || !IntermediateTexture2D)
+				return;
+
+			FTextureRenderTargetResource* OutputRenderTargetResource = OutputRenderTarget->GetRenderTargetResource();
+
+			if (!context)
 			{
-				IntermediateTexture2D = UTexture2D::CreateTransient(width, height, format);
-				IntermediateTexture2D->UpdateResource();
-
-				FRHITexture2D* Texture2D = IntermediateTexture2D->Resource->TextureRHI->GetTexture2D();
-				context = TSharedPtr<SpoutRecieverContext>(new SpoutRecieverContext(width, height, dwFormat, Texture2D));
+				const FTextureResource* IntermediateTextureResource = IntermediateTexture2D->GetResource();
+				check(IntermediateTextureResource);
+				check(IntermediateTextureResource->TextureRHI);
+			
+				FTexture2DRHIRef IntermediateTextureRef = IntermediateTextureResource->TextureRHI->GetTexture2D();
+				check(IntermediateTextureRef);
+			
+				context = TSharedPtr<SpoutRecieverContext>(new SpoutRecieverContext(width, height, dwFormat, IntermediateTextureRef));
 			}
 
-			this->Tick_RenderThread(RHICmdList, hSharehandle, RenderTargetResource);
+			this->Tick_RenderThread(RHICmdList, hSharehandle, OutputRenderTargetResource);
 		});
 	}
 }
@@ -339,51 +291,57 @@ void USpoutRecieverActorComponent::TickComponent(float DeltaTime, ELevelTick Tic
 void USpoutRecieverActorComponent::Tick_RenderThread(
 	FRHICommandListImmediate& RHICmdList,
 	void* hSharehandle,
-	FTextureRenderTargetResource* RenderTargetResource
+	FTextureRenderTargetResource* OutputRenderTargetResource
 )
 {
 	check(IsInRenderingThread());
+
+	SCOPED_DRAW_EVENT(RHICmdList, ProcessSpoutCopyTexture);
 
 	if (!GWorld || !GWorld->Scene || !context) return;
 
 	ID3D11Resource* SrcTexture = nullptr;
 	verify(context->D3D11Device->OpenSharedResource(hSharehandle, __uuidof(ID3D11Resource), (void**)(&SrcTexture)) == S_OK);
+	check(SrcTexture);
 
-	context->Tick(SrcTexture);
-
+	context->CopyResource(SrcTexture);
 	SrcTexture->Release();
 
 	FShaderResourceViewRHIRef IntermediateTextureParameterSRV;
-	ERHIFeatureLevel::Type FeatureLevel = GWorld->Scene->GetFeatureLevel();
 
 	{
-		auto Resource = IntermediateTexture2D->Resource;
+		auto Resource = IntermediateTexture2D->GetResource();
 		auto ParamRef = (Resource->TextureRHI.GetReference());
 		IntermediateTextureParameterSRV = RHICreateShaderResourceView(ParamRef, 0);
-		verify(IntermediateTextureParameterSRV.IsValid());
+		check(IntermediateTextureParameterSRV.IsValid());
 	}
 
 	{
-		FRHIRenderPassInfo RPInfo(RenderTargetResource->GetRenderTargetTexture(), ERenderTargetActions::DontLoad_Store, RenderTargetResource->TextureRHI);
+		auto ShaderResource = OutputRenderTargetResource->GetRenderTargetTexture(); 
+		
+		FRHIRenderPassInfo RPInfo(
+			ShaderResource,
+			ERenderTargetActions::DontLoad_Store);
 
 		RHICmdList.BeginRenderPass(RPInfo, TEXT("CopySpoutImage"));
 		{
-			FIntPoint OutputSize(RenderTargetResource->GetSizeX(), RenderTargetResource->GetSizeY());
+			FIntPoint OutputSize(
+				OutputRenderTargetResource->GetSizeX(), OutputRenderTargetResource->GetSizeY());
 
-			auto* GlobalShaderMap = GetGlobalShaderMap(FeatureLevel);
-			TShaderMapRef< FTextureCopyVertexShader > VertexShader(GlobalShaderMap);
-			TShaderMapRef< FTextureCopyPixelShader > PixelShader(GlobalShaderMap);
+			auto* GlobalShaderMap = GetGlobalShaderMap(GMaxRHIFeatureLevel);
+			TShaderMapRef<FMediaShadersVS> VertexShader(GlobalShaderMap);
+			TShaderMapRef<FTextureCopyPixelShader> PixelShader(GlobalShaderMap);
 
 			// Set the graphic pipeline state.
 			FGraphicsPipelineStateInitializer GraphicsPSOInit;
 			RHICmdList.ApplyCachedRenderTargets(GraphicsPSOInit);
-			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Always>::GetRHI();
+			GraphicsPSOInit.DepthStencilState = TStaticDepthStencilState<false, CF_Never>::GetRHI();
 			GraphicsPSOInit.BlendState = TStaticBlendState<>::GetRHI();
 			GraphicsPSOInit.RasterizerState = TStaticRasterizerState<>::GetRHI();
 			GraphicsPSOInit.PrimitiveType = PT_TriangleStrip;
-			GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GSimpleVertexDeclaration.VertexDeclarationRHI;
-
-#if ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION >= 25
+			GraphicsPSOInit.BoundShaderState.VertexDeclarationRHI = GMediaVertexDeclaration.VertexDeclarationRHI;
+			
+#if (ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION >= 25) || (ENGINE_MAJOR_VERSION == 5)
 			GraphicsPSOInit.BoundShaderState.VertexShaderRHI = VertexShader.GetVertexShader();
 			GraphicsPSOInit.BoundShaderState.PixelShaderRHI = PixelShader.GetPixelShader();
 #else ENGINE_MAJOR_VERSION == 4 && ENGINE_MINOR_VERSION <= 24
@@ -391,27 +349,22 @@ void USpoutRecieverActorComponent::Tick_RenderThread(
 			GraphicsPSOInit.BoundShaderState.PixelShaderRHI = GETSAFERHISHADER_PIXEL(*PixelShader);
 #endif
 
-			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit);
-
-			RHICmdList.SetViewport(0, 0, 0.0, OutputSize.X, OutputSize.Y, 1.f);
+			SetGraphicsPipelineState(RHICmdList, GraphicsPSOInit,
+				0, EApplyRendertargetOption::CheckApply, true);
 
 			if (PixelShader->SrcTexture.IsBound())
 			{
 				auto PixelShaderRHI = GraphicsPSOInit.BoundShaderState.PixelShaderRHI;
 				RHICmdList.SetShaderResourceViewParameter(PixelShaderRHI, PixelShader->SrcTexture.GetBaseIndex(), IntermediateTextureParameterSRV);
 			}
-
-			RHICmdList.SetStreamSource(0, GSimpleVertexBuffer.VertexBufferRHI, 0);
-
-			RHICmdList.DrawIndexedPrimitive(
-				GSimpleIndexBuffer.IndexBufferRHI,
-				/*BaseVertexIndex=*/ 0,
-				/*MinIndex=*/ 0,
-				/*NumVertices=*/ 4,
-				/*StartIndex=*/ 0,
-				/*NumPrimitives=*/ 2,
-				/*NumInstances=*/ 1);
+			
+			FBufferRHIRef VertexBuffer = CreateTempMediaVertexBuffer();
+			RHICmdList.SetStreamSource(0, VertexBuffer, 0);
+			RHICmdList.SetViewport(0, 0, 0.0, OutputSize.X, OutputSize.Y, 1.f);
+			RHICmdList.DrawPrimitive(0, 2, 1);
 		}
 		RHICmdList.EndRenderPass();
+
+		RHICmdList.CopyToResolveTarget(ShaderResource, ShaderResource, FResolveParams());
 	}
 }

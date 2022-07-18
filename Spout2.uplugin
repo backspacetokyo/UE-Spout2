@@ -5,12 +5,11 @@
 	"FriendlyName": "Spout2",
 	"Description": "",
 	"Category": "Other",
-	"CreatedBy": "satoruhiga",
+	"CreatedBy": "BACKSPACE Productions Inc",
 	"CreatedByURL": "",
 	"DocsURL": "",
 	"MarketplaceURL": "",
 	"SupportURL": "",
-	"EngineVersion": "4.25.0",
 	"CanContainContent": true,
 	"Installed": true,
 	"SupportedTargetPlatforms": [

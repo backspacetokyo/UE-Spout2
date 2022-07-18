@@ -88,6 +88,7 @@ public class Spout2 : ModuleRules
 				"RHI",
 				"Projects",
 				"D3D11RHI",
+				"Media",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
@@ -100,7 +101,7 @@ public class Spout2 : ModuleRules
 			}
 			);
 
-		if ((Target.Platform == UnrealTargetPlatform.Win64) || (Target.Platform == UnrealTargetPlatform.Win32))
+		if ((Target.Platform == UnrealTargetPlatform.Win64))
 		{
 			string PlatformString = (Target.Platform == UnrealTargetPlatform.Win64) ? "amd64" : "x86";
 			PublicAdditionalLibraries.Add(Path.Combine(ThirdPartyPath, "Spout/lib", PlatformString, "Spout.lib"));

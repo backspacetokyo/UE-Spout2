@@ -19,7 +19,7 @@ class SPOUT2_API USpoutRecieverActorComponent : public UActorComponent
 	UPROPERTY()
 	UTexture2D* IntermediateTexture2D = nullptr;
 
-	void Tick_RenderThread(FRHICommandListImmediate& RHICmdList, void* hSharehandle, FTextureRenderTargetResource* RenderTargetResource);
+	void Tick_RenderThread(FRHICommandListImmediate& RHICmdList, void* hSharehandle, FTextureRenderTargetResource* OutputRenderTargetResource);
 
 public:	
 	
@@ -38,5 +38,5 @@ public:
 	FName SubscribeName = "";
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spout2")
-	UTextureRenderTarget2D* InputTexture = nullptr;
+	UTextureRenderTarget2D* OutputRenderTarget = nullptr;
 };
